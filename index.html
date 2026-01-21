@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Fomily Mart Saga: Biohazard</title>
+    <style>
+        body { background: #050505; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: 'MS Gothic', 'Courier New', monospace; overflow: hidden; color: #00ff00; }
+        #container { position: relative; width: 400px; height: 400px; box-shadow: 0 0 50px rgba(0,0,0,1); background: #000; }
+        canvas { border: 2px solid #222; image-rendering: pixelated; width: 400px; height: 400px; }
+        #ui { position: absolute; top: -45px; width: 100%; display: flex; justify-content: space-between; font-size: 14px; text-shadow: 2px 2px #000; }
+        .vignette { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; box-shadow: inset 0 0 120px rgba(0,0,0,0.9); transition: 0.5s; }
+        #damage-noise { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; mix-blend-mode: screen; opacity: 0; background: url('https://www.transparenttextures.com/patterns/asfalt-dark.png'); }
+    </style>
+</head>
+<body>
+
+<div id="start-screen" style="position:absolute; background:rgba(0,0,0,0.98); padding:40px; text-align:center; z-index:100; border:1px solid #ff0000; width:320px; color:#ff0000;">
+    <h1 style="letter-spacing: 10px; border-bottom: 1px solid #ff0000; padding-bottom: 10px;">NEMATODE</h1>
+    <p id="start-msg" style="font-size:11px; line-height:2; color:#aaa; text-align: left;">
+        ・3つの秘宝(ARTIFACT)を回収せよ<br>
+        ・中央上部の「聖域(FomilyMart)」へ運べ<br>
+        ・線虫は秘宝を求める者を食べる
+    </p>
+    <button onclick="startGame()" style="padding:12px 40px; cursor:pointer; background:#111; color:#ff0000; border:1px solid #ff0000; font-weight: bold;">[ 執行を開始する ]</button>
+</div>
+
+<div id="container">
+    <div id="ui">
+        <div id="hearts" style="color:#ff0044;"></div>
+        <div id="location-name">SEARCHING...</div>
+        <div>ARTIFACT: <span id="t-count">0</span>/3</div>
+    </div>
+    <canvas id="gameCanvas" width="400" height="400"></canvas>
+    <div id="damage-noise"></div>
+    <div class="vignette" id="vign"></div>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    let audioCtx = null, bgmNode = null;
+    let animationId = null;
+
+    let p, currentMap, state, frame, enemies, rollY;
+    const treasuresBase = [null, null, { x: 300, y: 300, active: true }, { x: 100, y: 100, active: true }, { x: 200, y: 300, active: true }];
+    let treasures = [];
+    const keys = {};
+
+    function initGameVars() {
+        // 体力を2に設定
+        p = { x: 200, y: 250, size: 8, speed: 4, hp: 2, maxHp: 2, hasT: false, saved: 0, invul: 0 };
+        currentMap = 0;
+        state = "play";
+        frame = 0;
+        enemies = [];
+        rollY = 450; 
+        treasures = JSON.parse(JSON.stringify(treasuresBase));
+    }
+
+    class Nematode {
+        constructor(x, y, color) {
+            this.x = x; this.y = y; this.color = color;
+            this.segs = Array.from({length: 15}, () => ({x, y}));
+            this.phase = Math.random() * 6;
+        }
+        update(tx, ty) {
+            let speed = 0.02 + (p.saved * 0.015);
+            this.x += (tx - this.x) * speed;
+            this.y += (ty - this.y) * speed;
+            this.phase += 0.2;
+            let head = { x: this.x + Math.sin(this.phase)*10, y: this.y + Math.cos(this.phase)*10 };
+            for(let i=0; i<this.segs.length; i++) {
+                let target = i === 0 ? head : this.segs[i-1];
+                let dx = target.x - this.segs[i].x;
+                let dy = target.y - this.segs[i].y;
+                let angle = Math.atan2(dy, dx);
+                this.segs[i].x = target.x - Math.cos(angle) * 5;
+                this.segs[i].y = target.y - Math.sin(angle) * 5;
+            }
+        }
+        draw() {
+            this.segs.forEach((s, i) => {
+                ctx.fillStyle = i === 0 ? "#fff" : this.color;
+                ctx.beginPath(); ctx.arc(s.x, s.y, 8 - i*0.5, 0, Math.PI*2); ctx.fill();
+            });
+        }
+    }
+
+    window.onkeydown = e => keys[e.code] = true;
+    window.onkeyup = e => keys[e.code] = false;
+
+    function initAudio() { if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+
+    // 入店音（フォミリーマート風チャイム）
+    function playFomilyMartBell() {
+        if (!audioCtx) return;
+        const now = audioCtx.currentTime;
+        const melody = [739.99, 587.33, 440.00, 587.33, 659.25, 880.00, 659.25, 739.99, 587.33, 440.00, 587.33];
+        const times = [0, 0.15, 0.3, 0.45, 0.6, 0.75, 1.0, 1.15, 1.3, 1.45, 1.6];
+        melody.forEach((f, i) => {
+            const o = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            o.type = 'triangle'; 
+            o.frequency.setValueAtTime(f, now + times[i]);
+            g.gain.setValueAtTime(0, now + times[i]);
+            g.gain.linearRampToValueAtTime(0.06, now + times[i] + 0.02);
+            g.gain.exponentialRampToValueAtTime(0.001, now + times[i] + 0.5);
+            o.connect(g); g.connect(audioCtx.destination);
+            o.start(now + times[i]); o.stop(now + times[i] + 0.6);
+        });
+    }
+
+    // ブラウン管風ダメージノイズ音
+    function playDamageNoise() {
+        if(!audioCtx) return;
+        const bufferSize = audioCtx.sampleRate * 0.15;
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'highpass'; filter.frequency.value = 1000;
+        const g = audioCtx.createGain();
+        g.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+        noise.connect(filter); filter.connect(g); g.connect(audioCtx.destination);
+        noise.start();
+    }
+
+    function playDeathNoise() {
+        if(!audioCtx) return;
+        const bufferSize = audioCtx.sampleRate * 0.4;
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+        const gain = audioCtx.createGain();
+        gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
+        noise.connect(gain); gain.connect(audioCtx.destination);
+        noise.start();
+    }
+
+    function playSE(freqs) {
+        if(!audioCtx) return;
+        const now = audioCtx.currentTime;
+        freqs.forEach((f, i) => {
+            const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+            o.type = 'triangle'; o.frequency.setValueAtTime(f, now + i*0.1);
+            g.gain.setValueAtTime(0.05, now + i*0.1); g.gain.exponentialRampToValueAtTime(0.001, now + i*0.1 + 0.3);
+            o.connect(g); g.connect(audioCtx.destination);
+            o.start(now + i*0.1); o.stop(now + i*0.1 + 0.3);
+        });
+    }
+
+    function updateBGM() {
+        if (!audioCtx || state !== "play") return;
+        if (bgmNode) { try { bgmNode.stop(); } catch(e){} }
+        const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+        bgmNode = o; o.type = currentMap === 1 ? 'sine' : 'sawtooth';
+        o.frequency.setValueAtTime(currentMap === 1 ? 261 : 50 + currentMap*10, audioCtx.currentTime);
+        g.gain.value = 0.01; o.connect(g); g.connect(audioCtx.destination);
+        o.start();
+    }
+
+    function gameOver() {
+        state = "dead";
+        if (bgmNode) bgmNode.stop();
+        playDeathNoise();
+        setTimeout(() => {
+            document.getElementById('start-screen').style.display = 'block';
+            document.getElementById('start-msg').innerHTML = "<span style='color:red;'>ERROR: SUBJECT DECEASED</span><br>観測は失敗した。";
+        }, 600);
+    }
+
+    function startGame() {
+        if (animationId) cancelAnimationFrame(animationId);
+        initGameVars();
+        document.getElementById('start-screen').style.display = 'none';
+        initAudio(); 
+        updateBGM();
+        gameLoop();
+    }
+
+    function update() {
+        if (state === "dead") return;
+        if (state === "ending") { 
+            rollY -= 0.8; 
+            if (rollY < -650) {
+                state = "dead";
+                document.getElementById('start-screen').style.display = 'block';
+                document.getElementById('start-msg').innerHTML = "MISSION COMPLETE.<br>アーティファクトは奉納された。";
+            }
+            return; 
+        }
+        
+        if (p.hp <= 0) { gameOver(); return; }
+
+        if (keys['ArrowUp']) p.y -= p.speed; if (keys['ArrowDown']) p.y += p.speed;
+        if (keys['ArrowLeft']) p.x -= p.speed; if (keys['ArrowRight']) p.x += p.speed;
+        
+        if (p.invul > 0) {
+            p.invul--;
+            document.getElementById('damage-noise').style.opacity = p.invul / 60;
+        } else {
+            document.getElementById('damage-noise').style.opacity = 0;
+        }
+
+        let oldMap = currentMap;
+        const margin = 20;
+
+        if (p.y < 0) {
+            if (currentMap === 0) { 
+                currentMap = 1; 
+                p.y = 400 - margin; 
+                playFomilyMartBell(); // 安心の入店チャイム再生
+            } 
+            else if (currentMap === 4) { currentMap = 0; p.y = 400 - margin; }
+        } else if (p.y > 400) {
+            if (currentMap === 1) { currentMap = 0; p.y = margin; }
+            else if (currentMap === 0) { currentMap = 4; p.y = margin; }
+        } else if (p.x < 0) {
+            if (currentMap === 0) { currentMap = 3; p.x = 400 - margin; }
+            else if (currentMap === 2) { currentMap = 0; p.x = 400 - margin; }
+        } else if (p.x > 400) {
+            if (currentMap === 0) { currentMap = 2; p.x = margin; }
+            else if (currentMap === 3) { currentMap = 0; p.x = margin; }
+        }
+
+        if (oldMap !== currentMap) {
+            updateBGM(); enemies = [];
+            const names = ["FomilyMart Front", "- SANCTUARY -", "Bio Plains", "Abyssal Sea", "Cursed Ruins"];
+            document.getElementById('location-name').innerText = names[currentMap];
+            document.getElementById('vign').style.boxShadow = currentMap === 1 ? "none" : "inset 0 0 120px rgba(0,0,0,0.9)";
+        }
+
+        if (currentMap !== 1) {
+            if (Math.random() < (0.01 + p.saved*0.01) && enemies.length < (2 + p.saved)) {
+                enemies.push(new Nematode(Math.random()*400, -50, ["#113311","#111133","#331111"][currentMap%3]));
+            }
+            enemies.forEach(en => {
+                en.update(p.x, p.y);
+                if (p.invul === 0 && Math.hypot(p.x - en.x, p.y - en.y) < 18) { 
+                    p.hp--; p.invul = 60; 
+                    playDamageNoise(); // ダメージ時のノイズ
+                }
+            });
+        } else {
+            if (p.hp < p.maxHp && frame % 180 === 0) p.hp++;
+            if (p.hasT && Math.hypot(p.x - 200, p.y - 80) < 40) {
+                p.saved++; p.hasT = false;
+                playSE([880, 1100, 1300]);
+                if (p.saved >= 3) { state = "ending"; if(bgmNode) bgmNode.stop(); }
+            }
+        }
+
+        let t = treasures[currentMap];
+        if (t && t.active && !p.hasT && Math.hypot(p.x - t.x, p.y - t.y) < 25) {
+            t.active = false; p.hasT = true; playSE([880, 1320]);
+        }
+
+        document.getElementById('hearts').innerHTML = "■".repeat(Math.max(0, p.hp));
+        document.getElementById('t-count').innerText = p.saved;
+        frame++;
+    }
+
+    function draw() {
+        if (state === "dead") {
+            ctx.fillStyle = "#000"; ctx.fillRect(0,0,400,400);
+            for(let i=0; i<100; i++) { ctx.fillStyle = `rgba(255,255,255,${Math.random()})`; ctx.fillRect(Math.random()*400, Math.random()*400, 2, 2); }
+            return;
+        }
+
+        const bgs = ["#080808", "#ffffff", "#050a05", "#05050a", "#0a0505"];
+        ctx.fillStyle = bgs[currentMap]; ctx.fillRect(0, 0, 400, 400);
+
+        if (p.invul > 50) {
+            ctx.translate(Math.random()*4-2, Math.random()*4-2);
+        }
+
+        if (state === "ending") {
+            ctx.fillStyle = "#000"; ctx.fillRect(0,0,400,400);
+            ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.font = "14px serif";
+            const staff = [
+                "THE WORLD HAS BEEN SAVED", "", "--- CAST ---", "", "SUBJECT: YOU", "NEMATODES: THE ANCIENT ONES", "",
+                "--- STAFF ---", "", "DIRECTOR: GEMINI", "LEVEL DESIGN: ASHITABA", "MUSIC: BIO SYNTH", "",
+                "--- SPECIAL THANKS ---", "", "FOMILYMART SAGA PROJECT", "2000s FLASH MEMORIES", "", "", "PRESENTED BY GOOGLE"
+            ];
+            staff.forEach((l, i) => ctx.fillText(l, 200, rollY + i*40));
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            return;
+        }
+
+        if (currentMap === 0) { ctx.fillStyle = "#00a040"; ctx.fillRect(120, 0, 160, 15); }
+        if (currentMap === 1) { 
+            ctx.fillStyle = "#eee"; ctx.fillRect(50, 50, 300, 300);
+            ctx.fillStyle = "#00a040"; ctx.fillRect(170, 40, 60, 40);
+        }
+
+        let t = treasures[currentMap];
+        if (t && t.active) {
+            ctx.fillStyle = "#0ff"; ctx.shadowBlur = 15; ctx.shadowColor = "#0ff";
+            ctx.beginPath(); ctx.arc(t.x, t.y, 6 + Math.sin(frame/10)*2, 0, Math.PI*2); ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+
+        enemies.forEach(en => en.draw());
+
+        if (p.hasT) {
+            ctx.strokeStyle = `rgba(0, 255, 255, ${0.5 + Math.sin(frame/10)*0.5})`;
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(p.x, p.y, 15 + Math.sin(frame/5)*3, 0, Math.PI*2); ctx.stroke();
+            for(let i=0; i<4; i++) {
+                let ang = (frame/20) + (Math.PI/2 * i);
+                ctx.fillStyle = "#0ff"; ctx.fillRect(p.x + Math.cos(ang)*18 - 2, p.y + Math.sin(ang)*18 - 2, 4, 4);
+            }
+        }
+
+        ctx.fillStyle = p.invul % 10 < 5 ? (p.hasT ? "#0ff" : "#0f0") : "#f00";
+        ctx.fillRect(p.x-5, p.y-5, 10, 10);
+
+        if (p.invul > 0 && Math.random() > 0.5) {
+            ctx.fillStyle = "rgba(255,255,255,0.1)";
+            ctx.fillRect(0, Math.random()*400, 400, 2);
+        }
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    function gameLoop() { 
+        update(); 
+        draw(); 
+        animationId = requestAnimationFrame(gameLoop); 
+    }
+
+    initGameVars();
+</script>
+</body>
+</html>
