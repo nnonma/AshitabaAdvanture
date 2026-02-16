@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>令和版 FFA - Legend Edition</title>
+    <style>
+        body { background: #000; color: #0f0; font-family: "MS Gothic", "Hiragino Sans", monospace; padding: 10px; font-size: 14px; margin: 0; overflow-x: hidden; }
+        .main-container { max-width: 100%; margin: 0 auto; border: 2px solid #0f0; padding: 10px; box-sizing: border-box; }
+        
+        .news-ticker {
+            background: #a00; color: #fff; height: 30px; line-height: 30px;
+            white-space: nowrap; overflow: hidden; position: relative;
+            margin-bottom: 10px; border: 1px solid #fff; display: none;
+        }
+        .news-ticker span {
+            position: absolute; width: 100%; height: 100%; margin: 0;
+            transform: translateX(100%); animation: ticker 10s linear infinite;
+            font-weight: bold;
+        }
+        @keyframes ticker {
+            0% { transform: translateX(100%); }
+            100% { transform: translateX(-150%); }
+        }
+
+        .status-bar { background: #111; padding: 10px; border-bottom: 1px solid #0f0; margin-bottom: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 12px; }
+        .log-area { height: 200px; overflow-y: scroll; border: 1px solid #0f0; padding: 10px; background: #050505; margin: 10px 0; }
+        .inventory-area { max-height: 180px; overflow-y: auto; border: 1px solid #333; padding: 5px; background: #0a0a0a; }
+
+        .flex-container { display: flex; flex-direction: column; gap: 15px; }
+        @media (min-width: 768px) { .flex-container { flex-direction: row; } }
+
+        .main-game { flex: 2; }
+        .side-panel { flex: 1; border: 1px solid #0f0; padding: 10px; background: #111; }
+
+        button { background: #000; color: #0f0; border: 1px solid #0f0; padding: 12px; cursor: pointer; margin: 4px 0; width: 100%; font-size: 16px; font-weight: bold; touch-action: manipulation; }
+        @media (min-width: 768px) { button { width: auto; padding: 8px 15px; font-size: 14px; } }
+        button:hover:not(:disabled) { background: #0f0; color: #000; }
+        button:disabled { border-color: #333; color: #333; }
+
+        .inv-btn { width: 45px; padding: 5px; font-size: 10px; margin: 0 2px; }
+        .item-box { border-bottom: 1px solid #222; padding: 8px 0; display: flex; justify-content: space-between; align-items: center; }
+        .auction-item { border: 1px dashed #0f0; padding: 10px; margin: 5px 0; display: flex; justify-content: space-between; align-items: center;}
+        
+        .death-msg { color: #f00; font-weight: bold; }
+        .boss-msg { color: #ff0; font-weight: bold; }
+        .legend-msg { color: #0ff; font-weight: bold; text-shadow: 0 0 5px #fff; }
+        hr { border: 0; border-top: 1px solid #333; margin: 5px 0; }
+        h3 { font-size: 16px; border-left: 5px solid #0f0; padding-left: 10px; margin: 15px 0 5px; }
+    </style>
+</head>
+<body>
+
+<div class="news-ticker" id="news-ticker"><span id="ticker-text"></span></div>
+
+<div class="main-container">
+    <div class="status-bar">
+        <div>名: <strong id="name-display">---</strong></div>
+        <div>Lv: <span id="lv-display">1</span></div>
+        <div>HP: <span id="hp-display">100</span>/<span id="mhp-display">100</span></div>
+        <div>金: <span id="gold-display">0</span>G</div>
+        <div style="grid-column: span 2;">装備: <span id="weapon-display">素手</span> (+<span id="watk-display">0</span>)</div>
+    </div>
+
+    <div class="flex-container">
+        <div class="main-game">
+            <button id="btn-battle" onclick="battle()">闘技場へ行く</button>
+            <button onclick="rest()">宿屋に泊まる</button>
+            <div class="log-area" id="game-log"></div>
+            <h3>--- カバン (所持品) ---</h3>
+            <div class="inventory-area" id="inventory-list"></div>
+            <h3>--- オークション (最新5件) ---</h3>
+            <div id="auction-list"></div>
+            <button onclick="resetData()" style="color:red; border-color:red; font-size:12px; margin-top:30px;">転生</button>
+        </div>
+        <div class="side-panel">
+            <div style="font-weight: bold; border-bottom: 1px solid #0f0; padding-bottom: 5px;">生存者</div>
+            <div id="player-list" style="margin-top: 10px; font-size: 12px;"></div>
+        </div>
+    </div>
+</div>
+
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getDatabase, ref, set, onValue, remove, off, push, serverTimestamp, query, limitToLast, runTransaction, get } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCUcTNWvrSRhZPA1yim0KmuOB5hsRTQFWM",
+  databaseURL: "https://ashitabaadventure-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "ashitabaadventure",
+};
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    let myName = localStorage.getItem('ffa_name');
+    if (!myName) {
+        myName = prompt("名前を決めてください", "冒険者");
+        if(!myName || myName.trim() === "") myName = "名無し" + Math.floor(Math.random()*1000);
+        localStorage.setItem('ffa_name', myName);
+    }
+    document.getElementById('name-display').innerText = myName;
+
+    let isResetting = false;
+    let p = { lvl: 1, hp: 100, mhp: 100, baseAtk: 10, weapon: "素手", wAtk: 0, gold: 0, exp: 0, inventory: {} };
+
+    const pRef = ref(db, 'players/' + myName);
+    const auctionRef = ref(db, 'auction');
+    const worldLogRef = ref(db, 'world_log');
+
+    onValue(pRef, (snap) => {
+        if (isResetting) return;
+        const data = snap.val();
+        if (data) {
+            p = data;
+            if (!p.inventory) p.inventory = {};
+            refreshUI();
+            updateInventory();
+        } else { set(pRef, p); }
+    });
+
+    onValue(ref(db, 'players'), (snap) => {
+        const listDiv = document.getElementById('player-list');
+        listDiv.innerHTML = "";
+        const data = snap.val();
+        if (data) {
+            Object.keys(data).forEach(key => {
+                const item = document.createElement('div');
+                item.innerText = `・${key} (Lv.${data[key].lvl})`;
+                listDiv.appendChild(item);
+            });
+        }
+    });
+
+    onValue(query(worldLogRef, limitToLast(15)), (snap) => {
+        const logArea = document.getElementById('game-log');
+        logArea.innerHTML = "";
+        const logs = [];
+        snap.forEach(child => { 
+            const d = child.val();
+            logs.push(d);
+            if(d.type === "legend") {
+                const ticker = document.getElementById('news-ticker');
+                const text = document.getElementById('ticker-text');
+                ticker.style.display = "block";
+                text.innerText = "【速報】" + d.msg;
+                setTimeout(() => { ticker.style.display = "none"; }, 10000);
+            }
+        });
+        logs.reverse().forEach(d => {
+            const div = document.createElement('div');
+            div.className = d.type === "death" ? "death-msg" : d.type === "boss" ? "boss-msg" : d.type === "legend" ? "legend-msg" : "";
+            div.innerHTML = `${d.msg}<hr>`;
+            logArea.appendChild(div);
+        });
+    });
+
+    onValue(query(auctionRef, limitToLast(5)), (snap) => {
+        const aucArea = document.getElementById('auction-list');
+        aucArea.innerHTML = "";
+        const items = [];
+        snap.forEach(child => { items.push({id: child.key, ...child.val()}); });
+        items.reverse().forEach(itm => {
+            const div = document.createElement('div');
+            div.className = "auction-item";
+            div.innerHTML = `<div><strong>${itm.name}</strong> (+${itm.atk})<br><small>売主:${itm.seller}</small></div>`;
+            const btn = document.createElement('button');
+            btn.innerText = "100G";
+            btn.style.width = "70px";
+            btn.onclick = () => window.buyWpn(itm.id, itm.name, itm.atk, itm.seller);
+            div.appendChild(btn);
+            aucArea.appendChild(div);
+        });
+        if (items.length === 0) aucArea.innerText = "出品なし";
+    });
+
+    function refreshUI() {
+        document.getElementById('lv-display').innerText = p.lvl || 1;
+        document.getElementById('hp-display').innerText = p.hp || 0;
+        document.getElementById('mhp-display').innerText = p.mhp || 100;
+        document.getElementById('gold-display').innerText = p.gold || 0;
+        document.getElementById('weapon-display').innerText = p.weapon || "素手";
+        document.getElementById('watk-display').innerText = p.wAtk || 0;
+    }
+
+    function updateInventory() {
+        const invArea = document.getElementById('inventory-list');
+        invArea.innerHTML = "";
+        if (p.inventory) {
+            Object.keys(p.inventory).forEach(id => {
+                const item = p.inventory[id];
+                const div = document.createElement('div');
+                div.className = "item-box";
+                div.innerHTML = `<span style="font-size:12px;">${item.name}(+${item.atk})</span>`;
+                const btnGroup = document.createElement('div');
+                const eqBtn = document.createElement('button');
+                eqBtn.innerText = "装備"; eqBtn.className = "inv-btn";
+                eqBtn.onclick = () => window.equip(id);
+                const exBtn = document.createElement('button');
+                exBtn.innerText = "出品"; exBtn.className = "inv-btn";
+                exBtn.onclick = () => window.exhibit(id);
+                const delBtn = document.createElement('button');
+                delBtn.innerText = "廃棄"; delBtn.className = "inv-btn";
+                delBtn.style.color = "#f66"; delBtn.style.borderColor = "#633";
+                delBtn.onclick = () => window.discard(id);
+                btnGroup.appendChild(eqBtn); btnGroup.appendChild(exBtn); btnGroup.appendChild(delBtn);
+                div.appendChild(btnGroup);
+                invArea.appendChild(div);
+            });
+        }
+        if (invArea.innerHTML === "") invArea.innerHTML = "<small>空っぽ</small>";
+    }
+
+    window.addLog = function(msg, type = "normal") {
+        push(worldLogRef, { msg: msg, type: type, time: serverTimestamp() });
+    };
+
+    window.battle = function() {
+        if (p.hp <= 0) return alert("宿屋へ！");
+        const btn = document.getElementById('btn-battle');
+        btn.disabled = true; 
+        setTimeout(() => btn.disabled = false, 1200);
+
+        let rand = Math.random();
+        let isLegend = rand < 0.01; 
+        let isBoss = rand < 0.1; 
+        let enemy = isLegend ? "【超越】バハムート" : (isBoss ? "【ボス】邪神" : "モンスター");
+        
+        let dmg = Math.floor(Math.random() * (p.baseAtk + p.wAtk)) + 5;
+        let eDmg = Math.floor(Math.random() * (isLegend ? p.lvl * 25 : (isBoss ? p.lvl * 10 : p.lvl * 2)));
+
+        p.hp -= eDmg;
+        if (p.hp <= 0) {
+            p.hp = 0;
+            window.addLog(`${myName}が${enemy}に挑むも無惨に散った…`, "death");
+        } else {
+            p.gold += (isLegend ? 1000 : (isBoss ? 100 : 10));
+            window.addLog(`${myName}は${enemy}に${dmg}ダメージ！(${eDmg}の傷)`);
+            if (isLegend) window.addLog(`${myName}が伝説の${enemy}を討伐する奇跡を起こした！！`, "legend");
+            else if (isBoss) window.addLog(`${myName}が${enemy}を討伐！`, "boss");
+            
+            if (Math.random() < 0.25) {
+                let itemName = "";
+                let itemAtk = 0;
+                if (isLegend) {
+                    itemName = "神殺しの剣"; itemAtk = 150;
+                } else {
+                    const wList = [["鉄の剣", 10], ["ミスリル剣", 25], ["ラグナロク", 60]];
+                    const w = wList[Math.floor(Math.random() * wList.length)];
+                    itemName = w[0]; itemAtk = w[1];
+                }
+                const id = "item_" + Date.now() + "_" + Math.floor(Math.random()*1000);
+                if(!p.inventory) p.inventory = {};
+                p.inventory[id] = { name: itemName, atk: itemAtk };
+                window.addLog(`${myName}が【${itemName}】を入手！`);
+            }
+            p.exp += 10;
+            if (p.exp >= (p.lvl * 20)) {
+                p.lvl++; p.mhp += 20; p.hp = p.mhp; p.baseAtk += 5;
+                window.addLog(`${myName}がLv.${p.lvl}に！`, "boss");
+            }
+        }
+        set(pRef, p);
+    };
+
+    window.rest = function() {
+        p.hp = p.mhp;
+        window.addLog(`${myName}は宿屋のふかふかのベッドで全快した。`);
+        set(pRef, p);
+    };
+
+    window.equip = function(id) {
+        const item = p.inventory[id];
+        if(!item) return;
+        p.weapon = item.name; p.wAtk = item.atk;
+        set(pRef, p);
+        alert(item.name + "を装備！");
+    };
+
+    window.exhibit = function(id) {
+        const item = p.inventory[id];
+        if(!item) return;
+        if (confirm(item.name + "を出品？")) {
+            push(auctionRef, { name: item.name, atk: item.atk, seller: myName });
+            delete p.inventory[id];
+            set(pRef, p);
+        }
+    };
+
+    window.discard = function(id) {
+        const item = p.inventory[id];
+        if(!item) return;
+        if (confirm(item.name + "を捨てますか？")) {
+            delete p.inventory[id];
+            set(pRef, p);
+        }
+    };
+
+    window.buyWpn = function(aucId, wName, wAtk, sellerName) {
+        if (p.gold < 100) return alert("金不足");
+        if (sellerName === myName) return alert("自分の出品");
+        get(ref(db, 'players/' + sellerName)).then((snap) => {
+            if (!snap.exists()) {
+                alert("この出品者は既に消えています。品物を撤去します。");
+                remove(ref(db, `auction/${aucId}`));
+                return;
+            }
+            p.gold -= 100;
+            const id = "item_" + Date.now() + "_" + Math.floor(Math.random()*1000);
+            if(!p.inventory) p.inventory = {};
+            p.inventory[id] = { name: wName, atk: wAtk };
+            runTransaction(ref(db, `players/${sellerName}/gold`), (c) => (c || 0) + 100);
+            remove(ref(db, `auction/${aucId}`));
+            window.addLog(`${myName}が${sellerName}から【${wName}】を購入！`);
+            set(pRef, p).then(() => alert(wName + "を購入！"));
+        });
+    };
+
+    window.resetData = function() {
+        if(confirm("転生（全データ削除）しますか？")){
+            isResetting = true; off(pRef);
+            remove(pRef).then(() => { localStorage.removeItem('ffa_name'); location.reload(); });
+        }
+    };
+</script>
+</body>
+</html>
